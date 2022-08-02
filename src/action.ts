@@ -39,6 +39,9 @@ const run = async () => {
             reviews(first: 100) {
               nodes {
                 authorAssociation
+                author {
+                  login
+                }
                 state
               }
             }
@@ -60,6 +63,9 @@ const run = async () => {
           reviews: {
             nodes: {
               authorAssociation: CommentAuthorAssociation
+              author: {
+                login: string
+              }
               state: ReviewState
             }[]
           }
@@ -67,16 +73,62 @@ const run = async () => {
       }
     } = await client.graphql(query, vars)
 
-    const reviews = data.repository.pullRequest.reviews.nodes.filter(review =>
-      collaboratorAssociation.includes(review.authorAssociation)
-    )
+    const reviews: { [name: string]: string } = {};
+    data.repository.pullRequest.reviews.nodes.forEach(review => {reviews[review.author.login]=review.state})
 
-    debug(`${reviews.length} total valid reviews`)
+    const reviewersQuery = `
+      query GetRequestedReviewers(${queryArgs}) {
+        repository(owner: $repoOwner, name: $repoName) {
+          pullRequest(number: $prNumber) {
+            reviewRequests(first: 100) {
+              nodes {
+                requestedReviewer {
+                  ... on User {
+                    login
+                  }
+                  ... on Team {
+                    name
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `
+
+    const reviewersData: {
+      repository: {
+        pullRequest: {
+          reviewRequests: {
+            nodes: {
+              requestedReviewer: {
+                login?: String,
+                name?: String
+              }
+            }[]
+          }
+        }
+      }
+    } = await client.graphql(reviewersQuery, vars)
+
+    debug(`${Object.keys(reviews).length} total reviews`)
+
     Object.keys(ReviewState)
-      .filter(key => /^[a-zA-Z]+$/.test(key))
+      .filter(key => /^[a-z_A-Z]+$/.test(key))
       .forEach(stateName => {
-        const stateReviewsCount = reviews.filter(review => review.state === ((stateName as unknown) as ReviewState))
-          .length
+        let stateReviewsCount = 0;
+        Object.keys(reviews).forEach(username => {
+          if (reviews[username] === stateName) {
+            stateReviewsCount += 1;
+          }
+        });
+        if (stateName === 'PENDING'){
+          debug(`${stateName} list of needed reviewers: ${reviewersData.repository.pullRequest.reviewRequests.nodes.length} `);
+          // add pending reviews from manual requested reviewers
+          stateReviewsCount += reviewersData.repository.pullRequest.reviewRequests.nodes.length;
+        }
+
         const outputKey = stateName.toLowerCase()
         debug(`  ${outputKey}: ${stateReviewsCount.toLocaleString('en')}`)
         core.setOutput(outputKey, stateReviewsCount)
@@ -85,6 +137,7 @@ const run = async () => {
     core.setFailed(err)
   }
 }
+
 
 enum ReviewState {
   APPROVED = 'APPROVED',
